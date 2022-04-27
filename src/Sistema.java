@@ -5,9 +5,15 @@
 // Fase 1 - máquina virtual (vide enunciado correspondente)
 //
 
-import java.sql.SQLOutput;
-import java.util.*;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.util.LinkedList;
+import java.util.Scanner;
+
+
 public class Sistema {
+
 
     // -------------------------------------------------------------------------------------------------------
     // --------------------- H A R D W A R E - definicoes de HW ----------------------------------------------
@@ -15,14 +21,17 @@ public class Sistema {
     // -------------------------------------------------------------------------------------------------------
     // --------------------- M E M O R I A -  definicoes de opcode e palavra de memoria ----------------------
 
-    public class Word { 	// cada posicao da memoria tem uma instrucao (ou um dado)
-        public Opcode opc; 	//
-        public int r1; 		// indice do primeiro registrador da operacao (Rs ou Rd cfe opcode na tabela)
-        public int r2; 		// indice do segundo registrador da operacao (Rc ou Rs cfe operacao)
-        public int p; 		// parametro para instrucao (k ou A cfe operacao), ou o dado, se opcode = DADO
+    public static class Word {    // cada posicao da memoria tem uma instrucao (ou um dado)
+        public Opcode opc;    //
+        public int r1;        // indice do primeiro registrador da operacao (Rs ou Rd cfe opcode na tabela)
+        public int r2;        // indice do segundo registrador da operacao (Rc ou Rs cfe operacao)
+        public int p;        // parametro para instrucao (k ou A cfe operacao), ou o dado, se opcode = DADO
 
         public Word(Opcode _opc, int _r1, int _r2, int _p) {
-            opc = _opc;   r1 = _r1;    r2 = _r2;	p = _p;
+            opc = _opc;
+            r1 = _r1;
+            r2 = _r2;
+            p = _p;
         }
     }
     // -------------------------------------------------------------------------------------------------------
@@ -31,7 +40,7 @@ public class Sistema {
     // --------------------- C P U  -  definicoes da CPU -----------------------------------------------------
 
     public enum Opcode {
-        DATA, ___,		    // se memoria nesta posicao tem um dado, usa DATA, se não usada é NULO ___
+        DATA, ___,            // se memoria nesta posicao tem um dado, usa DATA, se não usada é NULO ___
         JMP, JMPI, JMPIG, JMPIL, JMPIE, JMPIM, JMPIGM, JMPILM, JMPIEM, STOP,   // desvios e parada
         ADDI, SUBI, ADD, SUB, MULT,             // matemáticos
         LDI, LDD, STD, LDX, STX, SWAP,          // movimentação
@@ -43,206 +52,367 @@ public class Sistema {
         INT_INVALID_INSTRUCTION,    // Nunca será usada, pois o Java não deixará compilar
         INT_INVALID_ADDRESS,        // Nossa memória tem 1024 posições
         INT_OVERFLOW,               // Nossa memória só trabalha com inteiros, ou seja de -2,147,483,648 até 2,147,483,647
-        INT_SYSTEM_CALL;            // Ativa chamada de I/O pelo comando TRAP
+        INT_SYSTEM_CALL,            // Ativa chamada de I/O pelo comando TRAP
+        INT_SCHEDULER;              // Aciona o Escalonador
     }
 
     public class CPU {
         // característica do processador: contexto da CPU ...
-        private int pc; 			// ... composto de program counter,
-        private Word ir; 			// instruction register,
-        private int[] reg;       	// registradores da CPU
+        private int pc;            // ... composto de program counter,
+        private Word ir;            // instruction register,
+        private int[] reg;        // registradores da CPU
+        public int maxInt;          // criado para podermos simular overflow
+        private int[] paginasAlocadas;
+        private int[] tabelaDePaginas;
+        private int tamPaginaMemoria;
+
+        // usado pelo escalonador
+        int delta;
+        int deltaMax;
+        boolean escalonadorState;
 
         // cria variável interrupção
         public Interrupts interrupts;
 
         private Word[] m;   // CPU acessa MEMORIA, guarda referencia 'm' a ela. memoria nao muda. ee sempre a mesma.
 
-        public CPU(Word[] _m) {     // ref a MEMORIA e interrupt handler passada na criacao da CPU
-            m = _m; 				// usa o atributo 'm' para acessar a memoria.
-            reg = new int[10]; 		// aloca o espaço dos registradores
+        public CPU(Word[] _m, int tamPaginaMemoria, int maxInt, int deltaMax, int [] reg, Interrupts interrupts, Word ir) {     // ref a MEMORIA e interrupt handler passada na criacao da CPU
+            m = _m;                // usa o atributo 'm' para acessar a memoria.
+            reg = new int[10];        // aloca o espaço dos registradores
+            this.maxInt = maxInt;          // números aceitos -100_000 até 100_000
+            this.tamPaginaMemoria = tamPaginaMemoria;
+            this.reg = reg;
+            this.interrupts = interrupts;
+            this.ir = ir;
+
+            delta = 0;
+            this.deltaMax = deltaMax;
+            escalonadorState = false;
         }
 
-        public void setContext(int _pc) {  // no futuro esta funcao vai ter que ser
+        public void setContext(int _pc, int [] paginasAlocadas, int [] registradores, Word instructionRegister, Interrupts interrupt) {  // no futuro esta funcao vai ter que ser
             pc = _pc;                                   // limite e pc (deve ser zero nesta versão)
-            this.interrupts = Interrupts.INT_NONE;      // imnicializa interrupção com NONE
+            this.interrupts = Interrupts.INT_NONE;      // inicializa interrupção com NONE
+            this.paginasAlocadas = paginasAlocadas;
+            this.tabelaDePaginas = tabelaDePaginas;
+            this.reg = registradores;
+            ir = instructionRegister;
+            this.interrupts = interrupt;
+        }
+
+        public void setEscalonadorState(boolean state){
+            this.escalonadorState = state;
+        }
+
+        public Interrupts getInterrupts(){
+            return interrupts;
+        }
+
+        public int [] getReg(){
+            return reg;
+        }
+
+        public int getPc(){
+            if (pc==0) return 0;
+            return traduzEndereco(pc);
+        }
+
+        public Word getIr(){
+            return ir;
         }
 
         private void dump(Word w) {
             System.out.print("[ ");
-            System.out.print(w.opc); System.out.print(", ");
-            System.out.print(w.r1);  System.out.print(", ");
-            System.out.print(w.r2);  System.out.print(", ");
-            System.out.print(w.p);  System.out.println("  ] ");
+            System.out.print(w.opc);
+            System.out.print(", ");
+            System.out.print(w.r1);
+            System.out.print(", ");
+            System.out.print(w.r2);
+            System.out.print(", ");
+            System.out.print(w.p);
+            System.out.println("  ] ");
         }
 
-        private void showState(){
-            System.out.println("       "+ pc);
+        private void showState() {
+            System.out.println("       " + pc);
             System.out.print("           ");
-            for (int i=0; i<8; i++) { System.out.print("r"+i);   System.out.print(": "+reg[i]+"     "); };
+            for (int i = 0; i < reg.length; i++) {
+                System.out.print("r" + i);
+                System.out.print(": " + reg[i] + "     ");
+            }
+            ;
             System.out.println("");
-            System.out.print("           ");  dump(ir);
+            System.out.print("           ");
+            dump(ir);
+        }
+
+
+        private boolean isRegisterValid(int register) {
+            if (register < 0 || register >= reg.length) {
+                interrupts = Interrupts.INT_INVALID_INSTRUCTION;
+                return false;
+            }
+            return true;
         }
 
         private boolean isAddressValid(int address) {
-            if (address < 0 || address >= 1024) {
+            if (address < 0 || address >= m.length) {
                 interrupts = Interrupts.INT_INVALID_ADDRESS;
                 return false;
             }
             return true;
         }
 
-        public void run() { 		// execucao da CPU supoe que o contexto da CPU, vide acima, esta devidamente setado
-            //System.out.println("Início da execução pela CPU");
+        private boolean isNumberValid(int number) {
+            if (number < maxInt * -1 || number > maxInt) {
+                interrupts = Interrupts.INT_OVERFLOW;
+                return false;
+            }
+            return true;
+        }
+
+        public int traduzEndereco (int endereco){
+            System.out.println(endereco);
+            System.out.println("paginas alocadas" + paginasAlocadas.length);
+
+            try {
+                return (paginasAlocadas[(endereco / tamPaginaMemoria)] * tamPaginaMemoria) + (endereco % tamPaginaMemoria);
+
+            } catch(ArrayIndexOutOfBoundsException e) {
+                System.out.println("Retorno -1 do traduz");
+                return -1;
+            }
+        }
+
+        public void run() {        // execucao da CPU supoe que o contexto da CPU, vide acima, esta devidamente setado
 
             boolean run = true;
-            while (run) { 			// ciclo de instrucoes. acaba cfe instrucao, veja cada caso.
+            while (run) {            // ciclo de instrucoes. acaba cfe instrucao, veja cada caso.
                 // FETCH
-                ir = m[pc]; 	// busca posicao da memoria apontada por pc, guarda em ir
-                //if debug
-                showState();
+
+                //if (isAddressValid(traduzEndereco(pc))) {
+                //    ir = m[traduzEndereco(pc)];
+                //}
+
+                //System.out.println("rodando a cpu");
+
+                ir = m[traduzEndereco(pc)];    // busca posicao da memoria apontada por pc, guarda em ir
+
+                delta++;
+                System.out.println("Delta em " + delta);
+
+                //só para debug
+                //showState();
+
                 // EXECUTA INSTRUCAO NO ir
                 switch (ir.opc) { // para cada opcode, sua execução
 
                     case LDI: // Rd ← k
-                        reg[ir.r1] = ir.p;
-                        pc++;
-                        break;
+                        if (isRegisterValid(ir.r1) && isNumberValid(ir.p)) {
+                            reg[ir.r1] = ir.p;
+                            pc++;
+                            break;
+                        } else
+                            break;
 
                     case LDD: // Rd ← [A]
-                        if (isAddressValid(ir.p))
-                            {
-                                reg[ir.r1] = m[ir.p].p;
-                                pc++;
-                                break;
-                            }
-                        else
+                        if (isRegisterValid(ir.r1) && isAddressValid(traduzEndereco(ir.p)) && isNumberValid(m[ir.p].p)) {
+                            reg[ir.r1] = m[traduzEndereco(ir.p)].p;
+                            pc++;
+                            break;
+                        } else
                             break;
 
                     case STD: // [A] ← Rs
-                        m[ir.p].opc = Opcode.DATA;
-                        m[ir.p].p = reg[ir.r1];
-                        pc++;
-                        break;
+                        if (isRegisterValid(ir.r1) && isAddressValid(traduzEndereco(ir.p)) && isNumberValid(reg[ir.r1])) {
+                            m[traduzEndereco(ir.p)].opc = Opcode.DATA;
+                            m[traduzEndereco(ir.p)].p = reg[ir.r1];
+                            pc++;
+                            break;
+                        } else
+                            break;
 
                     case ADD: // Rd ← Rd + Rs
-                        System.out.println("add_____________");
-                        reg[ir.r1] = reg[ir.r1] + reg[ir.r2];
-                        pc++;
-                        break;
+                        if (isRegisterValid(ir.r2) && isRegisterValid(ir.r1) && isNumberValid(reg[ir.r1]) && isNumberValid(reg[ir.r2]) && isNumberValid(reg[ir.r1] + reg[ir.r2])) {
+                            reg[ir.r1] = reg[ir.r1] + reg[ir.r2];
+                            pc++;
+                            break;
+                        } else {
+                            interrupts = Interrupts.INT_OVERFLOW;
+                            pc++;
+                            break;
+                        }
 
                     case MULT: // Rd ← Rd * Rs
-                        reg[ir.r1] = reg[ir.r1] * reg[ir.r2];
-                        // gera um overflow
-                        // -->  LIGA INT  (1)
-                        pc++;
-                        break;
+                        if (isRegisterValid(ir.r2) && isRegisterValid(ir.r1)) {
+                            if (isNumberValid(reg[ir.r1] * reg[ir.r2]) && isNumberValid(reg[ir.r1]) && isNumberValid(reg[ir.r2])) {
+                                reg[ir.r1] = reg[ir.r1] * reg[ir.r2];
+                                pc++;
+                                break;
+                            } else {
+                                pc++;
+                                break;
+                            }
+                        } else
+                            break;
 
                     case ADDI: // Rd ← Rd + k
-                        reg[ir.r1] = reg[ir.r1] + ir.p;
-                        pc++;
-                        break;
+                        if (isRegisterValid(ir.r1) && isNumberValid(reg[ir.r1]) && isNumberValid(ir.p) && isNumberValid(reg[ir.r1] + ir.p)) {
+                            reg[ir.r1] = reg[ir.r1] + ir.p;
+                            pc++;
+                            break;
+                        } else {
+                            interrupts = Interrupts.INT_OVERFLOW;
+                            pc++;
+                            break;
+                        }
+
 
                     case STX: // [Rd] ←Rs
-                        m[reg[ir.r1]].opc = Opcode.DATA;
-                        m[reg[ir.r1]].p = reg[ir.r2];
-                        pc++;
-                        break;
+                        if (isRegisterValid(ir.r1) && isRegisterValid(ir.r2) && isAddressValid(traduzEndereco(reg[ir.r1]))) {
+                            m[traduzEndereco(reg[ir.r1])].opc = Opcode.DATA;
+                            m[traduzEndereco(reg[ir.r1])].p = reg[ir.r2];
+                            pc++;
+                            break;
+                        } else
+                            break;
 
                     case LDX: // Rd ← [Rs]
-                        reg[ir.r1] = m[reg[ir.r2]].p;
-                        pc++;
-                        break;
+                        if (isRegisterValid(ir.r1) && isRegisterValid(ir.r2) && isAddressValid(traduzEndereco(reg[ir.r2])) && isNumberValid(m[reg[ir.r2]].p)) {
+                            reg[ir.r1] = m[traduzEndereco(reg[ir.r2])].p;
+                            pc++;
+                            break;
+                        } else
+                            break;
 
                     case SUB: // Rd ← Rd - Rs
-                        reg[ir.r1] = reg[ir.r1] - reg[ir.r2];
-                        pc++;
-                        break;
+                        if (isRegisterValid(ir.r1) && isRegisterValid(ir.r2) && isNumberValid(reg[ir.r2]) && isNumberValid(reg[ir.r1]) && isNumberValid(reg[ir.r1] - reg[ir.r2])) {
+                            reg[ir.r1] = reg[ir.r1] - reg[ir.r2];
+                            pc++;
+                            break;
+                        } else {
+                            interrupts = Interrupts.INT_OVERFLOW;
+                            pc++;
+                            break;
+                        }
 
                     case SUBI: // Rd ← Rd - k
-                        reg[ir.r1] = reg[ir.r1] - ir.p;
-                        pc++;
-                        break;
+                        if (isRegisterValid(ir.r1) && isNumberValid(reg[ir.r1]) && isNumberValid(ir.p) && isNumberValid(reg[ir.r1] - ir.p)) {
+                            reg[ir.r1] = reg[ir.r1] - ir.p;
+                            pc++;
+                            break;
+                        } else {
+                            interrupts = Interrupts.INT_OVERFLOW;
+                            pc++;
+                            break;
+                        }
 
                     case JMP: //  PC ← k
-                        pc = ir.p;
-                        break;
+                        if (isAddressValid(traduzEndereco(ir.p))) {
+                            pc = ir.p;
+                            break;
+                        } else
+                            break;
 
                     case JMPI: //  PC ← Rs
-                        pc = ir.r1;
-                        break;
+                        if (isRegisterValid(traduzEndereco(ir.r1)) && isAddressValid(traduzEndereco(reg[ir.r1]))) {
+                            pc = reg[ir.r1];
+                            break;
+                        } else
+                            break;
+
 
                     case JMPIG: // If Rc > 0 Then PC ← Rs Else PC ← PC +1
-                        if (reg[ir.r2] > 0) {
-                            pc = reg[ir.r1];
-                        } else {
-                            pc++;
-                        }
-                        break;
+                        if (isRegisterValid(ir.r2) && isRegisterValid(ir.r1) && isAddressValid(traduzEndereco(reg[ir.r1]))) {
+                            if (reg[ir.r2] > 0) {
+                                pc = reg[ir.r1];
+                            } else {
+                                pc++;
+                            }
+                            break;
+                        } else
+                            break;
 
                     case JMPIGM: // If Rc > 0 Then PC ← [A] Else PC ← PC +1
-                        //if (reg[ir.r1] > 0) {
-                        //    pc = ir.p;
-                        if (reg[ir.r2] > 0) {
-                            pc = m[ir.p].p;
-                        } else {
-                            pc++;
-                        }
-                        break;
+                        if (isRegisterValid(ir.r2) && isAddressValid(traduzEndereco(ir.p)) && isAddressValid(traduzEndereco(m[ir.p].p))) {
+                            if (reg[ir.r2] > 0) {
+                                pc = m[traduzEndereco(ir.p)].p;
+                            } else {
+                                pc++;
+                            }
+                            break;
+                        } else
+                            break;
 
                     case JMPILM: // If Rc < 0 Then PC ← [A] Else PC ← PC +1
-                        //if (reg[ir.r1] < 0) {
-                        //    pc = ir.p;
-                        if (reg[ir.r2] < 0) {
-                            pc = m[ir.p].p;
-                        } else {
-                            pc++;
-                        }
-                        break;
+                        if (isRegisterValid(ir.r2) && isAddressValid(traduzEndereco(ir.p)) && isAddressValid(traduzEndereco(m[ir.p].p))) {
+                            if (reg[ir.r2] < 0) {
+                                pc = m[traduzEndereco(ir.p)].p;
+                            } else {
+                                pc++;
+                            }
+                            break;
+                        } else
+                            break;
 
                     case JMPIEM: // If Rc = 0 Then PC ← [A] Else PC ← PC +1
-                        //if (reg[ir.r1] == 0) {
-                        //    pc = ir.p;
-                        if (reg[ir.r2] == 0) {
-                            pc = m[ir.p].p;
-                        } else {
-                            pc++;
-                        }
-                        break;
+                        if (isRegisterValid(ir.r2) && isAddressValid(traduzEndereco(ir.p)) && isAddressValid(traduzEndereco(m[ir.p].p))) {
+                            if (reg[ir.r2] == 0) {
+                                pc = m[traduzEndereco(ir.p)].p;
+                            } else {
+                                pc++;
+                            }
+                            break;
+                        } else
+                            break;
+
 
                     case JMPIE: // If Rc = 0 Then PC ← Rs Else PC ← PC +1
-                        if (reg[ir.r2] == 0) {
-                            pc = reg[ir.r1];
-                        } else {
-                            pc++;
-                        }
-                        break;
+                        if (isRegisterValid(ir.r1) && isRegisterValid(ir.r2) && isAddressValid(traduzEndereco(reg[ir.r1]))) {
+                            if (reg[ir.r2] == 0) {
+                                pc = reg[ir.r1];
+                            } else {
+                                pc++;
+                            }
+                            break;
+                        } else
+                            break;
 
                     case JMPIL: //  PC ← Rs
-                        if (reg[ir.r2] < 0) {
-                            pc = reg[ir.r1];
-                        } else {
-                            pc++;
-                        }
-                        break;
+                        if (isRegisterValid(ir.r1) && isRegisterValid(ir.r2) && isAddressValid(traduzEndereco(reg[ir.r1]))) {
+                            if (reg[ir.r2] < 0) {
+                                pc = reg[ir.r1];
+                            } else {
+                                pc++;
+                            }
+                            break;
+                        } else
+                            break;
 
                     case JMPIM: //  PC ← [A]
-                        pc = m[ir.p].p;
-                        break;
+                        if (isAddressValid(traduzEndereco(m[ir.p].p)) && isAddressValid(traduzEndereco(ir.p))) {
+                            pc = m[traduzEndereco(ir.p)].p;
+                            break;
+                        } else
+                            break;
 
                     case SWAP: // t <- r1; r1 <- r2; r2 <- t
-                        int temp;
-                        temp = reg[ir.r1];
-                        reg[ir.r1] = reg[ir.r2];
-                        reg [ir.r2] = temp;
-                        pc ++;
-                        break;
+                        if (isRegisterValid(ir.r1) && isRegisterValid(ir.r2) && isNumberValid(reg[ir.r1]) && isNumberValid(reg[ir.r2])) {
+                            int temp;
+                            temp = reg[ir.r1];
+                            reg[ir.r1] = reg[ir.r2];
+                            reg[ir.r2] = temp;
+                            pc++;
+                            break;
+                        } else
+                            break;
 
                     case STOP: // por enquanto, para execucao
                         break;
 
                     case TRAP:
                         interrupts = Interrupts.INT_SYSTEM_CALL;
-                        pc ++;
+                        pc++;
                         break;
 
                     case DATA:
@@ -255,50 +425,23 @@ public class Sistema {
                 }
 
                 // VERIFICA INTERRUPÇÃO !!! - TERCEIRA FASE DO CICLO DE INSTRUÇÕES
-                if (ir.opc==Opcode.STOP)
-                    {
+                if (ir.opc == Opcode.STOP) {
                     break; // break sai do loop da cpu
-                    }
+                }
 
-                if (interrupts != Interrupts.INT_NONE)
-                    switch (interrupts){
-                        case INT_INVALID_ADDRESS:
-                            System.out.println("Endereço inválido!");
-                            run = false;
-                            break;
+                // Aciona o Escalonador
+                if (delta==deltaMax && escalonadorState==true){
+                    delta=0;
+                    interrupts = Interrupts.INT_SCHEDULER;
+                }
 
-                        // Case implementado, mas nunca será usado, pois em Java não será nem permitido compilar o programa com uma instrução inválida
-                        case INT_INVALID_INSTRUCTION:
-                            System.out.println("Comando desconhecido!");
-                            run = false;
-                            break;
+                if (interrupts != Interrupts.INT_NONE) {
+                    run = monitor.interruptHandler(reg, m, pc, interrupts);
+                    interrupts = Interrupts.INT_NONE; // sai da chamada de sistema. talvez seja preciso criar um handler pra system call
+                }
 
-                        case INT_OVERFLOW:
-                            System.out.println("Deu overflow!");
-                            run = false;
-                            break;
 
-                        case INT_SYSTEM_CALL:
-                            // Entrada (in) (reg[8]=1): o programa lê um inteiro do teclado.
-                            // O parâmetro para IN, em reg[9], é o endereço de memória a armazenar a leitura
-                            // Saída (out) (reg[8]=2): o programa escreve um inteiro na tela.
-                            // O parâmetro para OUT, em reg[9], é o endereço de memória cujo valor deve-se escrever na tela
 
-                            Scanner in = new Scanner(System.in);
-
-                            if (reg[8]==1){
-                                int address_destiny = reg[9];
-                                int value_to_be_written = in.nextInt();
-                                m[address_destiny].p = value_to_be_written;
-                            }
-
-                            if (reg[8]==2){
-                                int source_adress = reg[9];
-                                System.out.println("Output: " + m[source_adress].p);
-                            }
-
-                            break;
-                    }
 
             }
         }
@@ -313,14 +456,24 @@ public class Sistema {
         public int tamMem;
         public Word[] m;
         public CPU cpu;
+        private int tamanhoPaginaMemoria;
 
-        public VM(){
+        public VM(int tamMem, int tamanhoPaginaMemoria, int maxInt, int deltaMax, int [] registradors, Interrupts interrupt, Word instructionRegister) {
             // memória
-            tamMem = 1024;
+            this.tamMem = tamMem;
+            this.tamanhoPaginaMemoria = tamanhoPaginaMemoria;
             m = new Word[tamMem]; // m ee a memoria
-            for (int i=0; i<tamMem; i++) { m[i] = new Word(Opcode.___,-1,-1,-1); };
+            for (int i = 0; i < tamMem; i++) {
+                m[i] = new Word(Opcode.___, -1, -1, -1);
+            }
+            ;
+
             // cpu
-            cpu = new CPU(m);   // cpu acessa memória
+            cpu = new CPU(m, tamanhoPaginaMemoria, maxInt, deltaMax, registradores, interrupt, instructionRegister);   // cpu acessa memória
+        }
+
+        public int getTamMem() {
+            return tamMem;
         }
     }
     // ------------------- V M  - fim ------------------------------------------------------------------------
@@ -337,15 +490,21 @@ public class Sistema {
     public class Monitor {
         public void dump(Word w) {
             System.out.print("[ ");
-            System.out.print(w.opc); System.out.print(", ");
-            System.out.print(w.r1);  System.out.print(", ");
-            System.out.print(w.r2);  System.out.print(", ");
-            System.out.print(w.p);  System.out.println("  ] ");
+            System.out.print(w.opc);
+            System.out.print(", ");
+            System.out.print(w.r1);
+            System.out.print(", ");
+            System.out.print(w.r2);
+            System.out.print(", ");
+            System.out.print(w.p);
+            System.out.println("  ] ");
         }
 
         public void dump(Word[] m, int ini, int fim) {
             for (int i = ini; i < fim; i++) {
-                System.out.print(i); System.out.print(":  ");  dump(m[i]);
+                System.out.print(i);
+                System.out.print(":  ");
+                dump(m[i]);
             }
         }
 
@@ -359,12 +518,389 @@ public class Sistema {
         }
 
         public void executa() {
-            vm.cpu.setContext(0);          // monitor seta contexto - pc aponta para inicio do programa
+            vm.cpu.setContext(0, gm.getFramesAlocados(), vm.cpu.getReg(), vm.cpu.getIr(), vm.cpu.getInterrupts());          // monitor seta contexto - pc aponta para inicio do programa
             vm.cpu.run();                  //                         e cpu executa
             // note aqui que o monitor espera que o programa carregado acabe normalmente
             // nao ha protecoes...  o que poderia acontecer ?
         }
+
+        // deveria ter esse método para manejo correto do input, mas falta arrumar o paginas alocadas
+        /*
+        public int traduzEndereco (int endereco){
+            try {
+                return (paginasAlocadas[(endereco / 16)] * 16) + (endereco % 16);
+            } catch(ArrayIndexOutOfBoundsException e) {
+                return -1;
+            }
+        }
+         */
+
+        public boolean interruptHandler(int[] registers, Word[] memory, int programCounter, Interrupts interrupts) {
+            switch (interrupts) {
+                case INT_SCHEDULER:
+                    System.out.println("Escalonador acionado");
+                    gp.runEscalonador(programCounter, registers, instructionRegister, interrupts, gp.running.getPaginasAlocadas());
+                    return true;
+
+                case INT_INVALID_ADDRESS:
+                    System.out.println("Endereço inválido, na linha: " + programCounter);
+                    dump(memory[programCounter]);
+                    return false;
+
+                // Consideramos, além de uma instrução inválida, o uso de um registrador inválido também
+                case INT_INVALID_INSTRUCTION:
+                    System.out.println("Comando desconhecido ou registrador inválido, na linha: " + programCounter);
+                    dump(memory[programCounter]);
+                    return false;
+
+                case INT_OVERFLOW:
+                    programCounter--;
+                    System.out.println("Deu overflow, na linha: " + programCounter);
+                    dump(memory[programCounter]);
+                    return false;
+
+                case INT_SYSTEM_CALL:
+                    // Entrada (in) (reg[8]=1): o programa lê um inteiro do teclado.
+                    // O parâmetro para IN, em reg[9], é o endereço de memória a armazenar a leitura
+                    // Saída (out) (reg[8]=2): o programa escreve um inteiro na tela.
+                    // O parâmetro para OUT, em reg[9], é o endereço de memória cujo valor deve-se escrever na tela
+
+                    Scanner in = new Scanner(System.in);
+
+                    if (registers[8] == 1) {
+                        int address_destiny = registers[9];
+                        System.out.println("Insira um número:");
+                        int value_to_be_written = in.nextInt();
+                        memory[address_destiny].p = value_to_be_written;
+                        return true;
+                    }
+
+                    if (registers[8] == 2) {
+                        int source_adress = registers[9];
+                        System.out.println("Output: " + memory[source_adress].p);
+                        return true;
+                    }
+            }
+            return true;
+        }
     }
+
+
+    public class GerenciadorMemoria {
+
+        private Word[] mem;
+        private int tamPagina;
+        private int tamFrame;
+        private int nroFrames;
+        private boolean[] tabelaPaginas;
+        //private int quantidadeDePaginasUsadas; // só para debug
+        public int [] framesAlocados;
+
+        public GerenciadorMemoria(Word[] mem, int tamPagina) {
+            this.mem = mem;
+            this.tamPagina = tamPagina;
+            tamFrame = tamPagina;
+            nroFrames = mem.length / tamPagina;
+            tabelaPaginas = initFrames();
+            //quantidadeDePaginasUsadas = 0;
+        }
+
+        private boolean[] initFrames() {
+            boolean[] free = new boolean[nroFrames];
+            for (int i = 0; i < nroFrames; i++) {
+                free[i] = true;
+            }
+
+            //mockando frames ocupados
+            free[0]=false;
+            free[2]=false;
+
+            return free;
+        }
+
+        public void dump(Word w) {
+            System.out.print("[ ");
+            System.out.print(w.opc);
+            System.out.print(", ");
+            System.out.print(w.r1);
+            System.out.print(", ");
+            System.out.print(w.r2);
+            System.out.print(", ");
+            System.out.print(w.p);
+            System.out.println("  ] ");
+        }
+
+        public void dumpMem(Word[] m, int ini, int fim) {
+            for (int i = ini; i < fim; i++) {
+                System.out.print(i);
+                System.out.print(":  ");
+                dump(m[i]);
+            }
+        }
+
+        public int getQuantidadePaginasUsadas(){
+            int quantidade = 0;
+            for (int i=0; i<tabelaPaginas.length; i++){
+                if (tabelaPaginas[i]==false) quantidade++;
+            }
+            return quantidade;
+        }
+
+        public void dumpMemoriaUsada(Word[] m) {
+            int fim = getQuantidadePaginasUsadas() * tamPagina;
+            for (int i = 0; i < fim; i++) {
+                System.out.print(i);
+                System.out.print(":  ");
+                dump(m[i]);
+            }
+        }
+
+        public void dumpPagina (Word[]m, int pagina){
+            int ini = tamPagina * pagina;
+            int fim = ini + tamPagina;
+            for (int i = ini; i < fim; i++) {
+                System.out.print(i);
+                System.out.print(":  ");
+                dump(m[i]);
+            }
+        }
+
+
+        // retorna null se não conseguir alocar, ou um array com os frames alocadas
+        public int[] aloca(Word[] programa) {
+            int quantidadePaginas = programa.length / tamPagina;
+            if (programa.length % tamPagina > 0) quantidadePaginas++; // vê se ainda tem código além da divisão inteira
+            framesAlocados = new int[quantidadePaginas];
+            int indiceAlocado = 0;
+            int indicePrograma = 0;   //indice do programa
+
+            // testa se tem espaço para alocar o programa
+            int framesLivres =0;
+            for (int i = 0; i < nroFrames; i++) {
+                if (tabelaPaginas[i]) //vê se o frame está vazio e conta 1
+                    framesLivres++;
+            }
+
+            // se não existe memória suficiente retorna um array com -1
+            if (framesLivres <= quantidadePaginas){
+                framesAlocados [0] = -1;
+                return framesAlocados;
+            }
+
+            for (int i = 0; i < nroFrames; i++) {
+                if (quantidadePaginas == 0) break;
+                if (tabelaPaginas[i]) { //vê se o frame está vazio e aloca o programa ali
+                    tabelaPaginas[i] = false; // marca o frame como ocupado
+
+                    for (int j = tamPagina * i; j < tamPagina * (i + 1); j++) {
+                        if (indicePrograma >= programa.length) break;
+                        mem[j].opc = programa[indicePrograma].opc;
+                        mem[j].r1 = programa[indicePrograma].r1;
+                        mem[j].r2 = programa[indicePrograma].r2;
+                        mem[j].p = programa[indicePrograma].p;
+                        indicePrograma++;
+                    }
+                    framesAlocados[indiceAlocado] = i;
+                    indiceAlocado++;
+                    quantidadePaginas--;
+                }
+
+            }
+
+            return framesAlocados;
+        }
+
+        public int[] getFramesAlocados(){
+            return framesAlocados;
+        }
+
+        public boolean[] getTabelaDePaginas(){
+            return tabelaPaginas;
+        }
+
+        public void desaloca(PCB processo){
+            int[] paginas = processo.getPaginasAlocadas();
+            for(int i = 0; i < paginas.length; i ++) {
+                tabelaPaginas[paginas[i]] = true; // libera o frame
+
+                // reseta as posicoes da memória
+                for (int j = tamPagina * paginas[i]; j < tamPagina * (paginas[i] + 1); j++) {
+                    mem[j].opc = Opcode.___;
+                    mem[j].r1 = -1;
+                    mem[j].r2 = -1;
+                    mem[j].p = -1;
+                }
+            }
+        }
+
+    }
+
+    public class GerenciadorProcessos {
+        private GerenciadorMemoria gm;
+        private Word[] memory;
+        private LinkedList<PCB> prontos;
+        private int process_id;
+        public PCB running;
+        public int posicaoEscalonador;
+
+        public GerenciadorProcessos(GerenciadorMemoria gm, Word[] memory) {
+            process_id=0;
+            this.gm = gm;
+            this.memory = memory;
+            this.prontos = new LinkedList<>();
+            this.posicaoEscalonador = 0;
+        }
+
+        public LinkedList<PCB> getProntos() {
+            return prontos;
+        }
+
+        public void setProntos(LinkedList<PCB> prontos){
+            this.prontos = prontos;
+        }
+
+        public PCB getRunning(){
+            return running;
+        }
+
+        public void setRunning(PCB processo){
+            running = processo;
+        }
+
+        public int[] getPaginasAlocadas (int process_id){
+            int [] paginasAlocadas = new int[1];
+            boolean achou = false;
+            for (int i = 0; i < prontos.size(); i++) {
+                if (prontos.get(i).id==process_id){
+                    paginasAlocadas = prontos.get(i).paginasAlocadas;
+                    achou = true;
+                }
+            }
+
+            if (achou==false){
+                paginasAlocadas= new int[1];
+                paginasAlocadas[0]=-1;
+            }
+
+            return paginasAlocadas;
+        }
+
+        public PCB getProcesso (int process_id){
+            PCB processo = null;
+            for (int i = 0; i < prontos.size(); i++) {
+                if (prontos.get(i).id==process_id){
+                    processo = prontos.get(i);
+                }
+            }
+            return processo;
+        }
+
+        public int criaProcesso(Word [] programa){
+            System.out.println("Processo " + process_id + " criado");
+            int[] paginasAlocadas = gm.aloca(programa);
+
+            // Se o processo não foi criado por falta de memória, retorna falso
+            if (paginasAlocadas[0]==-1){
+                return -1;
+            }
+
+            PCB processo = new PCB(process_id, paginasAlocadas, vm.cpu.getPc(), vm.cpu.getReg(), vm.cpu.getIr(), vm.cpu.getInterrupts());
+            prontos.add(processo);
+
+            process_id++;
+
+            //debug
+            System.out.println("Páginas alocadas");
+            for (int i=0; i<paginasAlocadas.length; i++){
+                System.out.println(paginasAlocadas[i] + " ");
+            }
+
+            return process_id-1;
+        }
+
+
+        public void finalizaProcesso(PCB processo){
+            gm.desaloca(processo);
+            prontos.remove(processo);
+        }
+
+        public void runEscalonador(int programCounter, int [] registradores, Word instructionRegister, Interrupts interrupt, int[] paginasAlocadas){
+            running = prontos.get(posicaoEscalonador);
+
+            // seta as variáveis do processo atual com estado atual da CPU
+            running.setContext(programCounter, registradores, instructionRegister, interrupt);
+
+            // para poder ciclar a posição do escalonador
+            posicaoEscalonador =  (posicaoEscalonador + 1) % prontos.size();
+
+            running = prontos.get(posicaoEscalonador);
+            System.out.println("running id " + running.getId());
+
+            // pega o contexto do processo que ira rodar agora
+            int programCounterDoRunning = running.getProgramCounter();
+            int [] paginasAlocadasDoRunning = running.getPaginasAlocadas();
+            int [] registradoresdoRunning = running.getRegistradores();
+            Word instructionRegisterDoRunning = running.getInstructionRegister();
+            Interrupts interruptsDoRunning = running.getInterrupt();
+
+            vm.cpu.setContext(programCounterDoRunning, paginasAlocadasDoRunning, registradoresdoRunning, instructionRegisterDoRunning, interruptsDoRunning);
+
+        }
+    }
+
+
+    public class PCB {
+
+        private int id;
+        public int programCounter;
+        private int[] paginasAlocadas;
+        public int[] registradores;
+        public Word instructionRegister;
+        public Interrupts interrupt;
+
+        public PCB(int id, int[]paginasAlocadas, int pc, int [] reg, Word ir, Interrupts interrupt) {
+            this.id= id;
+            this.paginasAlocadas = paginasAlocadas;
+            this.programCounter = pc;
+            this.registradores = reg;
+            this.instructionRegister = ir;
+            this.interrupt = interrupt;
+
+        }
+
+        public int[] getPaginasAlocadas(){
+            return this.paginasAlocadas;
+        }
+
+        public int getId(){
+            return this.id;
+        }
+
+        public int getProgramCounter(){
+            return programCounter;
+        }
+
+        public int[] getRegistradores(){
+            return registradores;
+        }
+
+        public Word getInstructionRegister(){
+            return instructionRegister;
+        }
+
+        public Interrupts getInterrupt(){
+            return interrupt;
+        }
+
+        public void setContext (int programCounter, int[] registradores, Word instructionRegister, Interrupts interrupt){
+            this.programCounter = programCounter;
+            this.registradores =registradores;
+            this.instructionRegister = instructionRegister;
+            this.interrupt = interrupt;
+        }
+
+    }
+
     // -------------------------------------------
 
 
@@ -376,245 +912,197 @@ public class Sistema {
     public VM vm;
     public Monitor monitor;
     public static Programas progs;
+    public GerenciadorMemoria gm;
+    public GerenciadorProcessos gp;
+    private Escalonador escalonador;
+    public int[] registradores;
+    public Word instructionRegister;
+    public Interrupts interrupt;
+    private LinkedList<PCB> prontos;
+    private LinkedList<PCB> bloqueados;
 
-    public Sistema(){   // a VM com tratamento de interrupções
-        vm = new VM();
+    public Sistema(int tamMemoria, int tamPagina, int maxInt, int quantidadeRegistradores, int deltaMax){   // a VM com tratamento de interrupções
+        registradores = new int[quantidadeRegistradores];
+        interrupt = Interrupts.INT_NONE;
+        instructionRegister = new Word(Opcode.___,-1,-1,-1);
+
+        vm = new VM(tamMemoria, tamPagina, maxInt, deltaMax, registradores, interrupt, instructionRegister);
         monitor = new Monitor();
         progs = new Programas();
+        prontos = new LinkedList();
+        bloqueados = new LinkedList();
+        gm = new GerenciadorMemoria(vm.m, tamPagina);
+        gp = new GerenciadorProcessos(gm, vm.m);
+
+        this.escalonador = new Escalonador(prontos, vm.cpu);
     }
 
     public void roda(Word[] programa){
-        monitor.carga(programa, vm.m);
+        //monitor.carga(programa, vm.m);
+        if (gp.criaProcesso(programa)==-1){
+            System.out.println("Falta memoria para rodar o programa");
+            return;
+        }
+
         System.out.println("---------------------------------- programa carregado ");
 
-        monitor.dump(vm.m, 0, programa.length);
-        //System.out.println("Dump realizado");
+        //monitor.dump(vm.m, 0, programa.length);
+        gm.dumpMemoriaUsada(vm.m);
 
         monitor.executa();
         System.out.println("---------------------------------- após execucao ");
 
-        monitor.dump(vm.m, 0, programa.length);
+        //monitor.dump(vm.m, 0, programa.length);
+        gm.dumpMemoriaUsada(vm.m);
+
+    }
+
+    // Fase 5 - Para demonstrar o funcionamento, você deve ter um sistema iterativo.
+    // Uma vez que o sistema esteja funcionando, ele fica esperando comandos.
+    // Os comandos possíveis são:
+    // cria nomeDePrograma - cria um processo com memória alocada, PCB, etc. que fica em uma lista de processos.
+    // esta chamada retorna um identificador único do processo no sistema (ex.: 1, 2, 3 …)
+    // executa id - executa o processo com id fornecido. se não houver processo, retorna erro.
+    // dump id - lista o conteúdo do PCB e o conteúdo de cada frame de memória do processo com id
+    // dumpM inicio fim - lista os frames de memória entre início e fim, independente do processo
+    // desaloca id - retira o processo id do sistema, tenha ele executado ou não
+
+    public int cria(Word[] programa){
+        int idDoProcessoCriado;
+        idDoProcessoCriado = gp.criaProcesso(programa);
+        if (idDoProcessoCriado==-1){
+            System.out.println("Falta memoria para rodar o programa");
+            return idDoProcessoCriado;
+        }
+
+        System.out.println("---------------------------------- programa carregado ");
+        gm.dumpMemoriaUsada(vm.m);
+        return idDoProcessoCriado;
+    }
+
+    public void executa(int processId) {
+        System.out.println("Iniciando execução do processo");
+        int [] paginasAlocadas = gp.getPaginasAlocadas(processId);
+        if (paginasAlocadas[0]==-1){
+            System.out.println("Processo não existe");
+            return;
+        }
+        System.out.println("Páginas alocadas");
+        for (int i=0; i<paginasAlocadas.length; i++){
+            System.out.println(paginasAlocadas[i] + " ");
+        }
+
+        PCB running = gp.getProcesso(processId);
+
+        // pega o contexto do processo que está rodando
+        int programCounterDoRunning = running.getProgramCounter();
+        int [] paginasAlocadasDoRunning = running.getPaginasAlocadas();
+        int [] registradoresdoRunning = running.getRegistradores();
+        Word instructionRegisterDoRunning = running.getInstructionRegister();
+        Interrupts interruptsDoRunning = running.getInterrupt();
+
+        vm.cpu.setContext(programCounterDoRunning, paginasAlocadasDoRunning, registradoresdoRunning, instructionRegisterDoRunning, interruptsDoRunning);
+        //vm.cpu.setContext(0, paginasAlocadas, registradores, instructionRegister, interrupt);          // monitor seta contexto - pc aponta para inicio do programa
+        vm.cpu.run();                  //                         e cpu executa
+        System.out.println("---------------------------------- programa executado ");
+        gm.dumpMemoriaUsada(vm.m);
+    }
+
+    public void executaComEscalonador() {
+        System.out.println("Iniciando execução dos processos prontos com escalonador");
+        vm.cpu.setEscalonadorState(true);
+        prontos = gp.getProntos();
+        PCB running = prontos.getFirst();
+        gp.setRunning(running);
+
+        // pega o contexto do processo que está rodando
+        int programCounterDoRunning = running.getProgramCounter();
+        int [] paginasAlocadasDoRunning = running.getPaginasAlocadas();
+        int [] registradoresdoRunning = running.getRegistradores();
+        Word instructionRegisterDoRunning = running.getInstructionRegister();
+        Interrupts interruptsDoRunning = running.getInterrupt();
+
+        vm.cpu.setContext(programCounterDoRunning, paginasAlocadasDoRunning, registradoresdoRunning, instructionRegisterDoRunning, interruptsDoRunning);
+
+        vm.cpu.run();
+        System.out.println("---------------------------------- Escalonador executado ");
+        gm.dumpMemoriaUsada(vm.m);
+    }
+
+    public void dump (int processId){
+        System.out.println("----------- dump do processo " + processId + "------------------");
+        int [] paginasAlocadas = gp.getPaginasAlocadas(processId);
+
+        for (int i=0; i<paginasAlocadas.length; i++){
+            gm.dumpPagina(vm.m, paginasAlocadas[i]);
+        }
+    }
+
+    public void dumpM (int inicio, int fim){
+        System.out.println("----------- dump com inicio em " + inicio + " e fim em " + fim);
+        for (int i = inicio; i<=fim; i++){
+            //System.out.println("fazendo dumop da página " + i);
+            gm.dumpPagina(vm.m, i);
+        }
+    }
+
+    public void desaloca (int processId){
+        PCB processo = gp.getProcesso(processId);
+        int [] paginasAlocadas = gp.getPaginasAlocadas(processId);
+        gp.finalizaProcesso(processo);
+        System.out.println("--------------Processo " + processId + " desalocado---------------");
+        for (int i=0; i<paginasAlocadas.length; i++){
+            gm.dumpPagina(vm.m, paginasAlocadas[i]);
+        }
+
+    }
+
+    // Fase 6 - Escalonador rodando no Sistema
+    public void runEscalonador() {
+        System.out.println("Iniciando Escalonador");
+        escalonador.run();
+    }
+
+    public class Escalonador {
+
+        private LinkedList<PCB> prontos;
+        private int pointer;
+        private PCB runningProcess;
+        private CPU cpu;
+
+        public Escalonador(LinkedList<PCB> prontos, CPU cpu) {
+            this.prontos = prontos;
+            this.pointer = 0;
+            this.cpu = cpu;
+        }
+
+        public void run() {
+            while(true){
+                if(prontos.isEmpty()==false) break; //Se esvaziou lista de prontos, termina.
+                PCB pcb = prontos.get(pointer);
+                this.runningProcess = pcb;
+                int old = pointer;
+                pointer = pointer + 1;
+                prontos.remove(old);
+                cpu.setContext(cpu.getPc(), pcb.getPaginasAlocadas(), cpu.getReg(), cpu.getIr(), cpu.getInterrupts());
+            }
+        }
+
+        public PCB getRunningProcess() {
+            return runningProcess;
+        }
+
+        public void setRunningProcessAsNull(){
+            this.runningProcess = null;
+        }
+
+        public LinkedList<PCB> getProntos() {
+            return prontos;
+        }
     }
 
     // -------------------  S I S T E M A - fim --------------------------------------------------------------
-    // -------------------------------------------------------------------------------------------------------
 
-    // -------------------------------------------------------------------------------------------------------
-    // ------------------- instancia e testa sistema
-    public static void main(String args[]) {
-        Sistema s = new Sistema();
-        //s.roda(progs.fibonacci10);           // "progs" significa acesso/referencia ao programa em memoria secundaria
-        // s.roda(progs.progMinimo);
-        //s.roda(progs.fatorial);
-        //s.roda(progs.invalidAddressTest);
-        //s.roda(progs.overflowTest);
-        //s.roda(progs.bubbleSort);
-        s.roda(progs.bubbleSort2);
-        //s.roda(progs.trapTestOutput);
-        //s.roda(progs.trapTestInput);
-
-    }
-    // -------------------------------------------------------------------------------------------------------
-    // --------------- TUDO ABAIXO DE MAIN É AUXILIAR PARA FUNCIONAMENTO DO SISTEMA - nao faz parte
-
-    //  -------------------------------------------- programas aa disposicao para copiar na memoria (vide carga)
-    public class Programas {
-        public Word[] progMinimo = new Word[] {
-                //       OPCODE      R1  R2  P         :: VEJA AS COLUNAS VERMELHAS DA TABELA DE DEFINICAO DE OPERACOES
-                //                                     :: -1 SIGNIFICA QUE O PARAMETRO NAO EXISTE PARA A OPERACAO DEFINIDA
-                new Word(Opcode.LDI, 0, -1, 999),
-                new Word(Opcode.STD, 0, -1, 10),
-                new Word(Opcode.STD, 0, -1, 11),
-                new Word(Opcode.STD, 0, -1, 12),
-                new Word(Opcode.STD, 0, -1, 13),
-                new Word(Opcode.STD, 0, -1, 14),
-                new Word(Opcode.STOP, -1, -1, -1) };
-
-        public Word[] fibonacci10 = new Word[] { // mesmo que prog exemplo, so que usa r0 no lugar de r8
-                new Word(Opcode.LDI, 1, -1, 0),  //0 coloca 0 no reg 1
-                new Word(Opcode.STD, 1, -1, 20),    // 20 posicao de memoria onde inicia a serie de fibonacci gerada //1, ou seja coloca valor de reg 1 (0) na posicao 20
-                new Word(Opcode.LDI, 2, -1, 1), //2 coloca 1 no reg 2
-                new Word(Opcode.STD, 2, -1, 21), //3 na posição 21 coloca o que está em no reg 2, ou seja coloca 1 na posicao 21
-                new Word(Opcode.LDI, 0, -1, 22), //4 coloca 22 no reg 0
-                new Word(Opcode.LDI, 6, -1, 6), //5 coloca 6 no reg 6 - linha do inicio do loop
-                new Word(Opcode.LDD, 7, -1, 17), //6 coloca 17 no reg 7. É o contador. será a posição one começam os dados, ou seja 20 + a quantidade de números fibonacci que queremos
-                // new Word(Opcode.LDI, 7, -1, 31), //6 coloca 31 no reg 7. É o contador. será a posição one começam os dados, ou seja 20 + a quantidade de números fibonacci que queremos
-                new Word(Opcode.LDI, 3, -1, 0), //7 coloca 0 no reg 3
-                new Word(Opcode.ADD, 3, 1, -1), //8
-                new Word(Opcode.LDI, 1, -1, 0), //9
-                new Word(Opcode.ADD, 1, 2, -1), //10 add reg 1 + reg 2
-                new Word(Opcode.ADD, 2, 3, -1), //11 add reg 2 + reg 3
-                new Word(Opcode.STX, 0, 2, -1), //12 coloca o que está em reg 2 (1) na posição  memória do reg 0 (22), ou seja coloca 1 na pos 22
-                new Word(Opcode.ADDI, 0, -1, 1), //13 add 1 no reg 0, ou seja reg fica com 23. Isso serve para mudar a posição da memória onde virá o próximo numero fbonacci
-                new Word(Opcode.SUB, 7, 0, -1), //14 reg 7 = reg 7 - o que esta no reg 0, ou seja 30 menos 23 e coloca em r7. Isso é o contador regressivo que fica em r7. se for 0, pára
-                new Word(Opcode.JMPIG, 6, 7, -1), //15 se r7 maior que 0 então pc recebe 6, else pc = pc + 1
-                new Word(Opcode.STOP, -1, -1, -1),   // POS 16
-                new Word(Opcode.DATA, -1, -1, 31), //17 numeros de fibonacci a serem calculados menos 20
-                new Word(Opcode.DATA, -1, -1, -1), //18
-                new Word(Opcode.DATA, -1, -1, -1), //19
-                new Word(Opcode.DATA, -1, -1, -1),   // POS 20
-                new Word(Opcode.DATA, -1, -1, -1), //21
-                new Word(Opcode.DATA, -1, -1, -1), //22
-                new Word(Opcode.DATA, -1, -1, -1), //23
-                new Word(Opcode.DATA, -1, -1, -1), //24
-                new Word(Opcode.DATA, -1, -1, -1), //25
-                new Word(Opcode.DATA, -1, -1, -1), //26
-                new Word(Opcode.DATA, -1, -1, -1), //27
-                new Word(Opcode.DATA, -1, -1, -1), //28
-                new Word(Opcode.DATA, -1, -1, -1),  // ate aqui - serie de fibonacci ficara armazenada //29
-                new Word(Opcode.DATA, -1, -1, -1)
-        };
-
-        public Word[] fatorial = new Word[] { 	 // este fatorial so aceita valores positivos.   nao pode ser zero
-                // linha   coment
-                new Word(Opcode.LDI, 0, -1, 6),      // 0   	r0 é valor a calcular fatorial
-                new Word(Opcode.LDI, 1, -1, 1),      // 1   	r1 é 1 para multiplicar (por r0)
-                new Word(Opcode.LDI, 6, -1, 1),      // 2   	r6 é 1 para ser o decremento
-                new Word(Opcode.LDI, 7, -1, 8),      // 3   	r7 tem posicao de stop do programa = 8
-                new Word(Opcode.JMPIE, 7, 0, 0),     // 4   	se r0=0 pula para r7(=8)
-                new Word(Opcode.MULT, 1, 0, -1),     // 5   	r1 = r1 * r0
-                new Word(Opcode.SUB, 0, 6, -1),      // 6   	decrementa r0 1
-                new Word(Opcode.JMP, -1, -1, 4),     // 7   	vai p posicao 4
-                new Word(Opcode.STD, 1, -1, 10),     // 8   	coloca valor de r1 na posição 10
-                new Word(Opcode.STOP, -1, -1, -1),    // 9   	stop
-                new Word(Opcode.DATA, -1, -1, -1) };  // 10   ao final o valor do fatorial estará na posição 10 da memória
-
-        public Word[] invalidAddressTest = new Word []{
-                new Word(Opcode.LDD, 0, -1, 1025),
-                new Word(Opcode.STOP, -1, -1, -1)
-        };
-
-        public Word[] overflowTest = new Word []{
-                new Word(Opcode.LDI, 0, -1, 2_147_483_647),
-                new Word(Opcode.LDI, 1, -1, 2_147_483_647),
-                new Word(Opcode.MULT, 0, 1, -1),
-                new Word(Opcode.STOP, -1, -1, -1)
-        };
-
-        public Word[] bubbleSort = new Word[]{
-                new Word(Opcode.DATA, -1, -1, 41), // jump do primeiro loop gm ou em
-                new Word(Opcode.DATA, -1, -1, 9), // jump do segundo loop gm ou em
-                new Word(Opcode.DATA, -1, -1, 34), // jump do terceiro loop lm
-                new Word(Opcode.DATA, -1, -1, -1),
-                new Word(Opcode.DATA, -1, -1, -1),
-                new Word(Opcode.DATA, -1, -1, -1),
-                new Word(Opcode.LDD, 1, -1, 43),
-                new Word(Opcode.LDI, 2, -1, 0),
-                new Word(Opcode.LDI, 3, -1, 0),
-                new Word(Opcode.LDI, 5, -1, 0),
-                new Word(Opcode.ADD, 5, 2, 0),
-                new Word(Opcode.SUB, 5, 1, 0),
-                new Word(Opcode.JMPIGM, 5, -1, 41),
-                new Word(Opcode.JMPIEM, 5, -1, 41),
-                new Word(Opcode.ADDI, 2, -1, 1),
-                new Word(Opcode.LDI, 3, -1, 0),
-                new Word(Opcode.LDI, 5, -1, 0),
-                new Word(Opcode.ADD, 5, 3, 0),
-                new Word(Opcode.ADDI, 5, -1, 1),
-                new Word(Opcode.SUB, 5, 1, 0),
-                new Word(Opcode.JMPIEM, 5, -1, 9),
-                new Word(Opcode.JMPIGM, 5, -1, 9),
-                new Word(Opcode.LDI, 4, -1, 44),
-                new Word(Opcode.ADD, 4, 3, 0),
-                new Word(Opcode.LDI, 5, -1, 1),
-                new Word(Opcode.ADD, 5, 4, 0),
-                new Word(Opcode.LDX, 4, 4, -1),
-                new Word(Opcode.LDX, 5, 5, -1),
-                new Word(Opcode.ADDI, 3, -1, 1),
-                new Word(Opcode.LDI, 6, -1, 0),
-                new Word(Opcode.ADD, 6, 5, 0),
-                new Word(Opcode.SUB, 6, 4, 1),
-                new Word(Opcode.JMPILM, 6, -1, 34),
-                new Word(Opcode.JMP, -1, -1, 16),
-                new Word(Opcode.SWAP, 5, 4, -1),
-                new Word(Opcode.LDI, 6, -1, 43),
-                new Word(Opcode.ADD, 6, 3, -1),
-                new Word(Opcode.STX, 6, 4, -1),
-                new Word(Opcode.ADDI, 6, -1, 1),
-                new Word(Opcode.STX, 6, 5, -1),
-                new Word(Opcode.JMP, -1, -1, 16),
-                new Word(Opcode.STOP, -1, -1, -1),
-                new Word(Opcode.DATA, 5, -1, 43), // linha 42
-                new Word(Opcode.DATA, 5, -1, 6), // tamanho do vetor
-                new Word(Opcode.DATA, 2, -1, 9), // dados do vetor
-                new Word(Opcode.DATA, 8, -1, 7),
-                new Word(Opcode.DATA, 4, -1, 2),
-                new Word(Opcode.DATA, 1, -1, 1),
-                new Word(Opcode.DATA, 1, -1, 4),
-                new Word(Opcode.DATA, 6, -1, 3)
-        };
-
-        public Word[] bubbleSort2 = new Word[]{
-                new Word(Opcode.DATA, -1, -1, 41), // jump do primeiro loop gm ou em
-                new Word(Opcode.DATA, -1, -1, 9), // jump do segundo loop gm ou em
-                new Word(Opcode.DATA, -1, -1, 34), // jump do terceiro loop lm
-                new Word(Opcode.DATA, -1, -1, -1),
-                new Word(Opcode.DATA, -1, -1, -1),
-                new Word(Opcode.DATA, -1, -1, -1),
-                new Word(Opcode.LDD, 1, -1, 43),
-                new Word(Opcode.LDI, 2, -1, 0),
-                new Word(Opcode.LDI, 3, -1, 0),
-                new Word(Opcode.LDI, 5, -1, 0), // linha 0. Início loop 1
-                new Word(Opcode.ADD, 5, 2, 0),
-                new Word(Opcode.SUB, 5, 1, 0),
-                new Word(Opcode.JMPIGM, -1, 5, 0), // linha 12 - pula pra linha 41 que é o fim (armazenado na memória [0])
-                new Word(Opcode.JMPIEM, -1, 5, 0),
-                new Word(Opcode.ADDI, 2, -1, 1),
-                new Word(Opcode.LDI, 3, -1, 0),
-                new Word(Opcode.LDI, 5, -1, 0),
-                new Word(Opcode.ADD, 5, 3, 0),
-                new Word(Opcode.ADDI, 5, -1, 1),
-                new Word(Opcode.SUB, 5, 1, 0),
-                new Word(Opcode.JMPIEM, -1, 5, 1), // linha 20. Pula pra linha 9 (armazenado na memória [1]). Loop 1
-                new Word(Opcode.JMPIGM, -1, 5, 1),
-                new Word(Opcode.LDI, 4, -1, 44),
-                new Word(Opcode.ADD, 4, 3, 0),
-                new Word(Opcode.LDI, 5, -1, 1),
-                new Word(Opcode.ADD, 5, 4, 0),
-                new Word(Opcode.LDX, 4, 4, -1),
-                new Word(Opcode.LDX, 5, 5, -1),
-                new Word(Opcode.ADDI, 3, -1, 1),
-                new Word(Opcode.LDI, 6, -1, 0),
-                new Word(Opcode.ADD, 6, 5, 0),
-                new Word(Opcode.SUB, 6, 4, 1),
-                new Word(Opcode.JMPILM, -1, 6, 2), // linha 32. pula pra linha 34 (amazenado na memroai [2])
-                new Word(Opcode.JMP, -1, -1, 16),
-                new Word(Opcode.SWAP, 5, 4, -1),
-                new Word(Opcode.LDI, 6, -1, 43),
-                new Word(Opcode.ADD, 6, 3, -1),
-                new Word(Opcode.STX, 6, 4, -1),
-                new Word(Opcode.ADDI, 6, -1, 1),
-                new Word(Opcode.STX, 6, 5, -1),
-                new Word(Opcode.JMP, -1, -1, 16),
-                new Word(Opcode.STOP, -1, -1, -1),
-                new Word(Opcode.DATA, -1, -1, -1), // linha 42. não usada
-                new Word(Opcode.DATA, -1, -1, 6), // tamanho do vetor
-                new Word(Opcode.DATA, -1, -1, 5), // dados do vetor
-                new Word(Opcode.DATA, -1, -1, 7),
-                new Word(Opcode.DATA, -1, -1, 2),
-                new Word(Opcode.DATA, -1, -1, 1),
-                new Word(Opcode.DATA, -1, -1, 4),
-                new Word(Opcode.DATA, -1, -1, 3)
-        };
-
-        public Word[] trapTestOutput = new Word[]{
-                new Word(Opcode.LDI, 1, -1, 44),    //coloca 44 no reg 1
-                new Word(Opcode.STD, 1, -1, 6),    // coloca o valor de reg1 na posição 6 da memória
-                new Word(Opcode.LDI, 8, -1, 2),     // coloca 2 em reg 8 para criar um trap de out
-                new Word(Opcode.LDI, 9,-1,6),      // coloca 6 no reg 9, ou seja a posição onde será feita a leitura
-                new Word(Opcode.TRAP,-1,-1,-1),     // faz o output da posição 10
-                new Word(Opcode.STOP, -1, -1, -1),
-                new Word(Opcode.DATA, -1, -1, -1)
-        };
-
-        public Word[] trapTestInput = new Word[]{
-                new Word(Opcode.LDI, 8, -1, 1),     // coloca 2 em reg 8 para criar um trap de input
-                new Word(Opcode.LDI, 9,-1,4),      // coloca 4 no reg 9, ou seja a posição onde será feita a escrita
-                new Word(Opcode.TRAP,-1,-1,-1),     // faz o output da posição 10
-                new Word(Opcode.STOP, -1, -1, -1),
-                new Word(Opcode.DATA, -1, -1, -1)
-        };
-
-    }
 }
+
 
