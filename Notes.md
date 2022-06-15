@@ -21,3 +21,16 @@ Table 8.4 Operating System Policies for Virtual Memory
 Page 393 Page fault 
 
 OPT (optimal), LRU (least recent used), FIFO, CLOCK
+
+
+- Fazer funcionar com a lista de bloqueados primeiro 
+
+
+Interrupt system call, colocar o processo na lista de bloqueados 
+
+id = ger proc.rruning.id
+coloca bloqueados
+
+gerProc.bloqueados.add(ger.proc.running) 
+
+ver mais algum lugar sobe a lista de bloqueados
